@@ -33,12 +33,13 @@ import hmac
 from binascii import a2b_base64
 from base64 import standard_b64encode
 
-from .core import ClientAuthenticator, ServerAuthenticator
-from .core import Failure, Response, Challenge, Success, Failure
-from .core import sasl_mechanism, default_nonce_factory
-from .saslprep import SASLPREP
+from .core import default_nonce_factory
+from .exceptions import BadChallengeException, \
+        ExtraChallengeException, ServerScramError, BadSuccessException, \
+        NotAuthorizedException
 
-logger = logging.getLogger("pyxmpp2.sasl.scram")
+
+logger = logging.getLogger("pyxmpp2_scram")
 
 HASH_FACTORIES = {
         "SHA-1": hashlib.sha1,      # pylint: disable=E1101
@@ -98,7 +99,7 @@ class SCRAMOperations(object):
         # pylint: disable=C0103
         if isinstance(str_, bytes):
             str_ = str_.decode("utf-8")
-        return SASLPREP.prepare(str_).encode("utf-8")
+        return str_.encode("utf-8")
 
     def HMAC(self, key, str_):
         """The HMAC(key, str) function."""
@@ -159,7 +160,7 @@ class SCRAMOperations(object):
         """
         return data.replace(b'=2C', b',').replace(b'=3D', b'=')
 
-class SCRAMClientAuthenticator(SCRAMOperations, ClientAuthenticator):
+class SCRAMClientAuthenticator(SCRAMOperations):
     """Provides SCRAM SASL authentication for a client.
 
     :Ivariables:
@@ -178,7 +179,6 @@ class SCRAMClientAuthenticator(SCRAMOperations, ClientAuthenticator):
             - `hash_function_name`: `unicode`
             - `channel_binding`: `bool`
         """
-        ClientAuthenticator.__init__(self)
         SCRAMOperations.__init__(self, hash_name)
         self.name = "SCRAM-{0}".format(hash_name)
         if channel_binding:
@@ -242,7 +242,7 @@ class SCRAMClientAuthenticator(SCRAMOperations, ClientAuthenticator):
                 self.escape(self.username.encode("utf-8")) + b"," + nonce)
         self._client_first_message_bare = client_first_message_bare
         client_first_message = gs2_header + client_first_message_bare
-        return Response(client_first_message)
+        return client_first_message
 
     def challenge(self, challenge):
         """Process a challenge and return the response.
@@ -252,55 +252,50 @@ class SCRAMClientAuthenticator(SCRAMOperations, ClientAuthenticator):
         :Types:
             - `challenge`: `bytes`
 
-        :return: the response or a failure indicator.
-        :returntype: `sasl.Response` or `sasl.Failure`
+        :return: the response
+        :returntype: bytes
+        :raises: `BadChallengeException`
         """
         # pylint: disable=R0911
         if not challenge:
-            logger.debug("Empty challenge")
-            return Failure("bad-challenge")
+            raise BadChallengeException('Empty challenge')
 
         if self._server_first_message:
             return self._final_challenge(challenge)
 
         match = SERVER_FIRST_MESSAGE_RE.match(challenge)
         if not match:
-            logger.debug("Bad challenge syntax: {0!r}".format(challenge))
-            return Failure("bad-challenge")
+            raise BadChallengeException("Bad challenge syntax: {0!r}".format(challenge))
 
         self._server_first_message = challenge
 
         mext = match.group("mext")
         if mext:
-            logger.debug("Unsupported extension received: {0!r}".format(mext))
-            return Failure("bad-challenge")
+            raise BadChallengeException("Unsupported extension received: {0!r}".format(mext))
 
         nonce = match.group("nonce")
         if not nonce.startswith(self._c_nonce):
-            logger.debug("Nonce does not start with our nonce")
-            return Failure("bad-challenge")
+            raise BadChallengeException("Nonce does not start with our nonce")
 
         salt = match.group("salt")
         try:
             salt = a2b_base64(salt)
         except ValueError:
-            logger.debug("Bad base64 encoding for salt: {0!r}".format(salt))
-            return Failure("bad-challenge")
+            raise BadChallengeException("Bad base64 encoding for salt: {0!r}".format(salt))
 
         iteration_count = match.group("iteration_count")
         try:
             iteration_count = int(iteration_count)
         except ValueError:
-            logger.debug("Bad iteration_count: {0!r}".format(iteration_count))
-            return Failure("bad-challenge")
+            raise BadChallengeException("Bad iteration_count: {0!r}".format(iteration_count))
 
         return self._make_response(nonce, salt, iteration_count)
 
     def _make_response(self, nonce, salt, iteration_count):
         """Make a response for the first challenge from the server.
 
-        :return: the response or a failure indicator.
-        :returntype: `sasl.Response` or `sasl.Failure`
+        :return: the response
+        :returntype: bytes
         """
         self._salted_password = self.Hi(self.Normalize(self.password), salt,
                                                             iteration_count)
@@ -325,7 +320,7 @@ class SCRAMClientAuthenticator(SCRAMOperations, ClientAuthenticator):
         proof = b"p=" + standard_b64encode(client_proof)
         client_final_message = (client_final_message_without_proof + b"," +
                                                                     proof)
-        return Response(client_final_message)
+        return client_final_message
 
     def _final_challenge(self, challenge):
         """Process the second challenge from the server and return the
@@ -336,35 +331,29 @@ class SCRAMClientAuthenticator(SCRAMOperations, ClientAuthenticator):
         :Types:
             - `challenge`: `bytes`
 
-        :return: the response or a failure indicator.
-        :returntype: `sasl.Response` or `sasl.Failure`
+        :raises: `ExtraChallengeException`, `BadChallengeException`, `ServerScramError`, or `BadSuccessException`
         """
         if self._finished:
-            return Failure("extra-challenge")
+            return ExtraChallengeException()
 
         match = SERVER_FINAL_MESSAGE_RE.match(challenge)
         if not match:
-            logger.debug("Bad final message syntax: {0!r}".format(challenge))
-            return Failure("bad-challenge")
+            raise BadChallengeException("Bad final message syntax: {0!r}".format(challenge))
 
         error = match.group("error")
         if error:
-            logger.debug("Server returned SCRAM error: {0!r}".format(error))
-            return Failure(u"scram-" + error.decode("utf-8"))
+            raise ServerScramError("{0!r}".format(error))
 
         verifier = match.group("verifier")
         if not verifier:
-            logger.debug("No verifier value in the final message")
-            return Failure("bad-succes")
+            raise BadSuccessException("No verifier value in the final message")
 
         server_key = self.HMAC(self._salted_password, b"Server Key")
         server_signature = self.HMAC(server_key, self._auth_message)
         if server_signature != a2b_base64(verifier):
-            logger.debug("Server verifier does not match")
-            return Failure("bad-succes")
+            raise BadSuccessException("Server verifier does not match")
 
         self._finished = True
-        return Response(None)
 
     def finish(self, data):
         """Process success indicator from the server.
@@ -377,26 +366,23 @@ class SCRAMClientAuthenticator(SCRAMOperations, ClientAuthenticator):
         :Types:
             - `data`: `bytes`
 
-        :return: success or failure indicator.
-        :returntype: `sasl.Success` or `sasl.Failure`"""
+        :return: username and authzid
+        :returntype: `dict`
+        :raises: `BadSuccessException`"""
         if not self._server_first_message:
-            logger.debug("Got success too early")
-            return Failure("bad-success")
+            raise BadSuccessException("Got success too early")
         if self._finished:
-            return Success({"username": self.username, "authzid": self.authzid})
+            return {"username": self.username, "authzid": self.authzid}
         else:
-            ret = self._final_challenge(data)
-            if isinstance(ret, Failure):
-                return ret
+            self._final_challenge(data)
             if self._finished:
-                return Success({"username": self.username,
-                                                    "authzid": self.authzid})
+                return {"username": self.username,
+                                                    "authzid": self.authzid}
             else:
-                logger.debug("Something went wrong when processing additional"
+                raise BadSuccessException("Something went wrong when processing additional"
                                                         " data with success?")
-                return Failure("bad-success")
 
-class SCRAMServerAuthenticator(SCRAMOperations, ServerAuthenticator):
+class SCRAMServerAuthenticator(SCRAMOperations):
     """Provides SCRAM SASL authentication for a server.
     """
     def __init__(self, hash_name, channel_binding, password_database):
@@ -409,7 +395,6 @@ class SCRAMServerAuthenticator(SCRAMOperations, ServerAuthenticator):
             - `hash_function_name`: `unicode`
             - `channel_binding`: `bool`
         """
-        ServerAuthenticator.__init__(self, password_database)
         SCRAMOperations.__init__(self, hash_name)
         self.name = "SCRAM-{0}".format(hash_name)
         if channel_binding:
@@ -426,7 +411,7 @@ class SCRAMServerAuthenticator(SCRAMOperations, ServerAuthenticator):
         self._client_first_message_bare = None
         self.out_properties = {}
         if not initial_response:
-            return Challenge(b"")
+            return b""
         return self.response(initial_response)
 
     def response(self, response):
@@ -440,37 +425,31 @@ class SCRAMServerAuthenticator(SCRAMOperations, ServerAuthenticator):
     def _handle_first_response(self, response):
         match = CLIENT_FIRST_MESSAGE_RE.match(response)
         if not match:
-            logger.debug("Bad response syntax: {0!r}".format(response))
-            return Failure("not-authorized")
+            raise NotAuthorizedException("Bad response syntax: {0!r}".format(response))
 
         mext = match.group("mext")
         if mext:
-            logger.debug("Unsupported extension received: {0!r}".format(mext))
-            return Failure("not-authorized")
+            raise NotAuthorizedException("Unsupported extension received: {0!r}".format(mext))
 
         gs2_header = match.group("gs2_header")
         cb_name = match.group("cb_name")
         if self.channel_binding:
             if not cb_name:
-                logger.debug("{0!r} used with no channel-binding"
+                raise NotAuthorizedException("{0!r} used with no channel-binding"
                                                             .format(self.name))
-                return Failure("not-authorized")
             cb_name = cb_name.decode("utf-8")
             if cb_name not in self.properties["channel-binding"]:
-                logger.debug("Channel binding data type {0!r} not available"
+                raise NotAuthorizedException("Channel binding data type {0!r} not available"
                                                             .format(cb_name))
-                return Failure("not-authorized")
         else:
             if gs2_header.startswith(b'y'):
                 plus_name = self.name + "-PLUS"
                 if plus_name in self.properties.get("enabled_mechanisms", []):
-                    logger.warning("Channel binding downgrade attack detected")
-                    return Failure("not-authorized")
+                    raise NotAuthorizedException("Channel binding downgrade attack detected")
             elif gs2_header.startswith(b'p'):
                 # is this really an error?
-                logger.debug("Channel binding requested for {0!r}"
+                raise NotAuthorizedException("Channel binding requested for {0!r}"
                                                             .format(self.name))
-                return Failure("not-authorized")
 
         authzid = match.group("authzid")
         if authzid:
@@ -539,27 +518,23 @@ class SCRAMServerAuthenticator(SCRAMOperations, ServerAuthenticator):
         self._gs2_header = gs2_header
         self._client_first_message_bare = match.group("client_first_bare")
         self._server_first_message = server_first_message
-        return Challenge(server_first_message)
+        return server_first_message
 
     def _handle_final_response(self, response):
         match = CLIENT_FINAL_MESSAGE_RE.match(response)
         if not match:
-            logger.debug("Bad response syntax: {0!r}".format(response))
-            return Failure("not-authorized")
+            raise NotAuthorizedException("Bad response syntax: {0!r}".format(response))
         if match.group("nonce") != self._nonce:
-            logger.debug("Bad nonce in the final client response")
-            return Failure("not-authorized")
+            raise NotAuthorizedException("Bad nonce in the final client response")
         cb_input = a2b_base64(match.group("cb"))
         if not cb_input.startswith(self._gs2_header):
-            logger.debug("GS2 header in the final response ({0!r}) doesn't"
+            raise NotAuthorizedException("GS2 header in the final response ({0!r}) doesn't"
                     " match the one sent in the first message ({1!r})"
                                         .format(cb_input, self._gs2_header))
-            return Failure("not-authorized")
         if self._cb_name:
             cb_data = cb_input[len(self._gs2_header):]
             if cb_data != self.properties["channel-binding"][self._cb_name]:
-                logger.debug("Channel binding data doesn't match")
-                return Failure("not-authorized")
+                raise NotAuthorizedException("Channel binding data doesn't match")
 
         proof = a2b_base64(match.group("proof"))
 
@@ -571,118 +546,15 @@ class SCRAMServerAuthenticator(SCRAMOperations, ServerAuthenticator):
             client_signature = self.HMAC(b"", auth_message)
             client_key = self.XOR(client_signature, proof)
             self.H(client_key)
-            logger.debug("Authentication failed (bad username)")
-            return Failure("not-authorized")
+            raise NotAuthorizedException("Authentication failed (bad username)")
 
         client_signature = self.HMAC(self._stored_key, auth_message)
         client_key = self.XOR(client_signature, proof)
         if self.H(client_key) != self._stored_key:
-            logger.debug("Authentication failed")
-            return Failure("not-authorized")
+            raise NotAuthorizedException("Authentication failed")
 
         server_signature = self.HMAC(self._server_key, auth_message)
         server_final_message = b"v=" + standard_b64encode(server_signature)
-        return Success(self.out_properties, server_final_message)
+        return (self.out_properties, server_final_message)
 
-@sasl_mechanism("SCRAM-SHA-1", 80)
-class SCRAM_SHA_1_ClientAuthenticator(SCRAMClientAuthenticator):
-    """The SCRAM-SHA-1 client authenticator.
-
-    Authentication properties used:
-
-        - ``"username"`` - user name (required)
-        - ``"authzid"`` - authorization id (optional)
-        - ``"enabled_mechanisms"`` - list of mechanism enabled on the client.
-          Used to detect when an attacker removes the -PLUS version from the
-          list of mechanism supported by the server.
-
-    Authentication properties returned:
-
-        - ``"username"`` - user name
-        - ``"authzid"`` - authorization id
-    """
-    # pylint: disable=C0103
-    def __init__(self):
-        SCRAMClientAuthenticator.__init__(self, "SHA-1", False)
-
-@sasl_mechanism("SCRAM-SHA-1-PLUS", 90)
-class SCRAM_SHA_1_PLUS_ClientAuthenticator(SCRAMClientAuthenticator):
-    """The SCRAM-SHA-1-PLUS client authenticator.
-
-    Authentication properties used: same as for
-    `SCRAM_SHA_1_ClientAuthenticator`, plus:
-
-        - ``"channel-binding"`` - channel-binding data, as a dictionary
-          channel-binding-type (`unicode`) -> channel-binding data(`bytes`).
-          Channel binding type should be 'tls-unique', as other may be not
-          supported by the other side.
-
-    Authentication properties returned: same as for
-    `SCRAM_SHA_1_ClientAuthenticator`
-
-    """
-    # pylint: disable=C0103
-    def __init__(self):
-        SCRAMClientAuthenticator.__init__(self, "SHA-1", True)
-    @classmethod
-    def are_properties_sufficient(cls, properties):
-        ret = super(SCRAM_SHA_1_PLUS_ClientAuthenticator, cls
-                                ).are_properties_sufficient(properties)
-        if not ret:
-            return False
-        return bool(properties.get("channel-binding"))
-
-@sasl_mechanism("SCRAM-SHA-1", 80)
-class SCRAM_SHA_1_ServerAuthenticator(SCRAMServerAuthenticator):
-    """The SCRAM-SHA-1 server authenticator.
-
-    Authentication properties used:
-
-        - ``"enabled_mechanisms"`` - list of mechanism enabled on the server.
-          Used to detect when an attacker removes the -PLUS version from the
-          list of mechanism supported by the server while it is sent to the
-          client.
-        - ``"SCRAM-salt"`` - salt to be applied on a plain text password
-          (default: a random string)
-        - ``"SCRAM-iteration-count"`` - iteration-count parameter for hashing
-          a plain text password (default: 4096)
-
-    Authentication properties returned:
-
-        - ``"username"`` - user name
-        - ``"authzid"`` - authorization id
-
-    """
-    # pylint: disable=C0103
-    def __init__(self, password_database):
-        SCRAMServerAuthenticator.__init__(self, "SHA-1", False,
-                                                            password_database)
-
-@sasl_mechanism("SCRAM-SHA-1-PLUS", 90)
-class SCRAM_SHA_1_PLUS_ServerAuthenticator(SCRAMServerAuthenticator):
-    """The SCRAM-SHA-1-PLUS server authenticator.
-
-    Authentication properties used: same as for
-    `SCRAM_SHA_1_ServerAuthenticator`, plus:
-
-        - ``"channel-binding"`` - channel-binding data, as a dictionary
-          channel-binding-type (`unicode`) -> channel-binding data(`bytes`).
-          Channel binding type should be 'tls-unique', as other may be not
-          supported by the other side.
-
-    Authentication properties returned: same as for
-    `SCRAM_SHA_1_ServerAuthenticator`
-
-    """
-    # pylint: disable=C0103
-    def __init__(self, password_database):
-        SCRAMServerAuthenticator.__init__(self, "SHA-1", True,
-                                                            password_database)
-    @classmethod
-    def are_properties_sufficient(cls, properties):
-        ret = super(SCRAM_SHA_1_PLUS_ServerAuthenticator, cls
-                                ).are_properties_sufficient(properties)
-        if not ret:
-            return False
-        return bool(properties.get("channel-binding"))
 
