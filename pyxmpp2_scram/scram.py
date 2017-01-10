@@ -402,6 +402,7 @@ class SCRAMServerAuthenticator(SCRAMOperations):
         self.channel_binding = channel_binding
         self.properties = None
         self.out_properties = None
+        self.password_database = password_database
         self._client_first_message_bare = None
         self._stored_key = None
         self._server_key = None

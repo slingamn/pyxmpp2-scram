@@ -32,7 +32,7 @@ setup(
             "Topic :: Software Development :: Libraries :: Python Modules",
         ],
     license =   'LGPL',
-    install_requires = install_requires,
+    install_requires = [],
     packages = [
         'pyxmpp2_scram',
     ],
