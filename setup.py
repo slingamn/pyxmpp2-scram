@@ -5,7 +5,7 @@ import sys
 
 from setuptools import setup
 
-version = "2.0alpha2-git"
+version = "2.0-0"
 
 setup(
     name =      'pyxmpp2_scram',
