@@ -20,7 +20,7 @@ Normative reference:
   - :RFC:`5802`
 """
 
-from __future__ import absolute_import, division
+from __future__ import absolute_import, division, unicode_literals
 
 __docformat__ = "restructuredtext en"
 
@@ -203,7 +203,7 @@ class SCRAMClientAuthenticator(SCRAMOperations):
     def start(self, properties):
         self.username = properties["username"]
         self.password = properties["password"]
-        self.authzid = properties.get("authzid", u"")
+        self.authzid = properties.get("authzid", "")
         c_nonce = properties.get("nonce_factory", default_nonce_factory)()
         if not VALUE_CHARS_RE.match(c_nonce):
             c_nonce = standard_b64encode(c_nonce)
