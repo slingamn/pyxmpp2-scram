@@ -5,7 +5,7 @@ import sys
 
 from setuptools import setup
 
-version = "2.0.1"
+version = "2.0.2"
 
 setup(
     name =      'pyxmpp2_scram',
@@ -15,7 +15,7 @@ setup(
     author_email =  'jajcus@jajcus.net',
     maintainer = 'Valentin Lorentz',
     maintainer_email = 'progval+git@progval.net',
-    url =       'https://github.com/Jajcus/pyxmpp2',
+    url =       'https://github.com/ProgVal/pyxmpp2-scram/',
     classifiers = [
             "Development Status :: 3 - Alpha",
             "Intended Audience :: Developers",
@@ -26,6 +26,10 @@ setup(
             "Programming Language :: Python :: 2.7",
             "Programming Language :: Python :: 3",
             "Programming Language :: Python :: 3.2",
+            "Programming Language :: Python :: 3.3",
+            "Programming Language :: Python :: 3.4",
+            "Programming Language :: Python :: 3.5",
+            "Programming Language :: Python :: 3.6",
             "Topic :: Communications",
             "Topic :: Communications :: Chat",
             "Topic :: Internet",
